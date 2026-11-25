@@ -1,0 +1,26 @@
+require('dotenv').config();
+const express=require('express'), mongoose=require('mongoose'), bcrypt=require('bcryptjs'), jwt=require('jsonwebtoken');
+const helmet=require('helmet'), cors=require('cors'), {rateLimit}=require('express-rate-limit');
+const {User,Report}=require('./models');
+const app=express();
+const secret=process.env.JWT_SECRET;
+if(!secret || secret.length<32 || secret.startsWith('REEMPLAZAR') || !process.env.MONGODB_URI) throw Error('Configura MONGODB_URI y JWT_SECRET en .env');
+app.use(helmet()); app.use(cors()); app.use(express.json({limit:'5mb'}));
+app.use('/api/auth',rateLimit({windowMs:15*60*1000,limit:30,standardHeaders:true,legacyHeaders:false}));
+const fail=(res,code,message)=>res.status(code).json({message});
+const clean=v=>typeof v==='string'?v.trim():'';
+const categories=['Electricidad','Infraestructura','Internet','Mobiliario','Equipo de cómputo','Otro'];
+const statuses=['Pendiente','En proceso','Resuelto'];
+const publicUser=u=>({id:u.id,name:u.name,email:u.email,role:u.role});
+const session=(res,u)=>res.json({user:publicUser(u),token:jwt.sign({sub:u.id},secret,{expiresIn:'7d',algorithm:'HS256'})});
+async function auth(req,res,next){try{const token=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];const payload=jwt.verify(token,secret,{algorithms:['HS256']});req.user=await User.findById(payload.sub);if(!req.user)return fail(res,401,'Sesión inválida');next();}catch{return fail(res,401,'Inicia sesión nuevamente');}}
+app.get('/api/health',(req,res)=>res.json({ok:mongoose.connection.readyState===1,service:'CampusFix API',mongodb:mongoose.connection.readyState===1?'Conectado':'Desconectado'}));
+app.post('/api/auth/register',async(req,res)=>{const name=clean(req.body.name),email=clean(req.body.email).toLowerCase(),password=req.body.password;if(name.length<2||name.length>100||email.length>254||!/^\S+@\S+\.\S+$/.test(email)||typeof password!=='string'||password.length<8||Buffer.byteLength(password)>72)return fail(res,400,'Nombre, correo y contraseña de al menos 8 caracteres requeridos');try{const u=await User.create({name,email,password:await bcrypt.hash(password,12)});return session(res,u);}catch(e){if(e.code===11000)return fail(res,409,'El correo ya está registrado');throw e;}});
+app.post('/api/auth/login',async(req,res)=>{const u=await User.findOne({email:clean(req.body.email).toLowerCase()}).select('+password');const p=req.body.password;if(!u||typeof p!=='string'||Buffer.byteLength(p)>72||!(await bcrypt.compare(p,u.password)))return fail(res,401,'Credenciales incorrectas');return session(res,u);});
+app.get('/api/auth/me',auth,(req,res)=>res.json({user:publicUser(req.user)}));
+app.get('/api/reports',auth,async(req,res)=>{const filter=req.user.role==='admin'?{}:{owner:req.user.id};const reports=await Report.find(filter).sort({createdAt:-1}).limit(100).populate('owner','name');res.json(reports);});
+app.get('/api/reports/:id',auth,async(req,res)=>{if(!mongoose.isValidObjectId(req.params.id))return fail(res,400,'ID inválido');const report=await Report.findOne({_id:req.params.id,...(req.user.role==='admin'?{}:{owner:req.user.id})}).select('+photo').populate('owner','name');if(!report)return fail(res,404,'Reporte no encontrado');res.json(report);});
+app.post('/api/reports',auth,async(req,res)=>{const {category,latitude,longitude,photo}=req.body;const place=clean(req.body.place),description=clean(req.body.description);if(!categories.includes(category)||!place||place.length>150||description.length<5||description.length>1500)return fail(res,400,'Verifica categoría, lugar y descripción');if((latitude!=null||longitude!=null)&&(!Number.isFinite(latitude)||!Number.isFinite(longitude)||Math.abs(latitude)>90||Math.abs(longitude)>180))return fail(res,400,'Coordenadas inválidas');if(photo!=null&&(typeof photo!=='string'||photo.length>4500000||!/^data:image\/jpeg;base64,\/9j\/[A-Za-z0-9+/=]+$/.test(photo)))return fail(res,400,'Fotografía JPEG inválida o demasiado grande');const r=await Report.create({owner:req.user.id,category,place,description,latitude,longitude,photo});res.status(201).json({id:r.id,status:r.status});});
+app.patch('/api/reports/:id/status',auth,async(req,res)=>{if(req.user.role!=='admin')return fail(res,403,'Solo administradores');if(!mongoose.isValidObjectId(req.params.id)||!statuses.includes(req.body.status))return fail(res,400,'Datos inválidos');const report=await Report.findByIdAndUpdate(req.params.id,{status:req.body.status},{new:true});if(!report)return fail(res,404,'Reporte no encontrado');res.json(report);});
+app.use((err,req,res,next)=>{console.error('API:',err.name,err.code||'');if(err.type==='entity.too.large')return fail(res,413,'Fotografía demasiado grande');if(err.type==='entity.parse.failed')return fail(res,400,'JSON inválido');return fail(res,500,'Error interno del servidor');});
+mongoose.connect(process.env.MONGODB_URI,{dbName:'campusfix',serverSelectionTimeoutMS:15000}).then(()=>app.listen(Number(process.env.PORT)||4100,'0.0.0.0',()=>console.log('CampusFix API activa. MongoDB conectado.'))).catch(e=>{console.error('MongoDB:',e.message);process.exit(1);});

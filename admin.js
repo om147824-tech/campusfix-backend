@@ -1,0 +1,3 @@
+require('dotenv').config();
+const mongoose=require('mongoose'),bcrypt=require('bcryptjs'),{User}=require('./models');
+(async()=>{const email=process.env.ADMIN_EMAIL?.trim().toLowerCase(),p=process.env.ADMIN_PASSWORD;if(!email||!p||p.startsWith('REEMPLAZAR')||p.length<12||Buffer.byteLength(p)>72)throw Error('Configura ADMIN_EMAIL y ADMIN_PASSWORD (12+ caracteres)');await mongoose.connect(process.env.MONGODB_URI,{dbName:'campusfix'});await User.findOneAndUpdate({email},{$set:{name:'Administración',role:'admin',password:await bcrypt.hash(p,12)}},{upsert:true,new:true,runValidators:true});console.log('Administrador configurado:',email);})().catch(e=>{console.error(e.message);process.exitCode=1;}).finally(()=>mongoose.disconnect());
